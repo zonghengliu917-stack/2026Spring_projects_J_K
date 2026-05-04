@@ -1,9 +1,10 @@
 import argparse
 import csv
 import os
+from typing import Optional
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 
 BASE_URL = "https://m.compassedu.hk"
@@ -11,10 +12,23 @@ DETAIL_URL_TEMPLATE = BASE_URL + "/newst/{id}"
 
 
 def clean_text(text: str) -> str:
+    """Collapse all whitespace in *text* to single spaces and strip leading/trailing whitespace."""
     return " ".join(text.split())
 
 
 def fetch_html(session: requests.Session, url: str) -> str:
+    """Fetch the HTML content of *url* using *session*.
+
+    Args:
+        session: A ``requests.Session`` object used for the HTTP request.
+        url: The fully-qualified URL to fetch.
+
+    Returns:
+        The response body as a decoded string.
+
+    Raises:
+        requests.HTTPError: If the server returns a 4xx or 5xx status code.
+    """
     resp = session.get(
         url,
         headers={
@@ -29,25 +43,42 @@ def fetch_html(session: requests.Session, url: str) -> str:
 
 
 def is_valid_detail_page(soup: BeautifulSoup) -> bool:
+    """Return True if *soup* contains a CompassEdu offer detail panel with an info-box."""
     return bool(soup.select_one(".module-panel .info-box"))
 
 
-def find_info_panel(soup: BeautifulSoup):
+def find_info_panel(soup: BeautifulSoup) -> Optional[Tag]:
+    """Return the first ``.module-panel`` element that contains an ``.info-box``, or None."""
     for panel in soup.select(".module-panel"):
         if panel.select_one(".info-box"):
-           
             return panel
     return None
 
 
-def find_experience_panel(soup: BeautifulSoup):
+def find_experience_panel(soup: BeautifulSoup) -> Optional[Tag]:
+    """Return the first ``.module-panel`` containing experience items, or None.
+
+    Looks for either ``.experience_box`` or ``.experience_text`` child elements.
+    """
     for panel in soup.select(".module-panel"):
         if panel.select(".experience_box") or panel.select(".experience_text"):
             return panel
     return None
 
 
-def parse_detail_page(html: str) -> dict:
+def parse_detail_page(html: str) -> dict[str, str]:
+    """Parse a CompassEdu offer detail page and return its fields as a flat dict.
+
+    Extracts the page title, the last five info-box rows (label → value), and any
+    numbered experience items joined into a single ``"experience"`` string.
+
+    Args:
+        html: Raw HTML string of the detail page.
+
+    Returns:
+        A dict mapping field names (e.g. ``"录取学校"``) to their string values.
+        The ``"experience"`` key is present only when experience items are found.
+    """
     soup = BeautifulSoup(html, "html.parser")
     data: dict[str, str] = {}
 
@@ -89,7 +120,16 @@ def parse_detail_page(html: str) -> dict:
     return data
 
 
-def write_csv(rows: list[dict], output_path: str) -> None:
+def write_csv(rows: list[dict[str, str]], output_path: str) -> None:
+    """Write *rows* to a CSV file at *output_path*, creating parent directories as needed.
+
+    Column order is determined by the union of all keys across *rows*, in the order
+    they are first encountered.
+
+    Args:
+        rows: List of dicts where each dict represents one scraped offer record.
+        output_path: Destination file path (relative or absolute).
+    """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     headers: list[str] = []
     for row in rows:
@@ -105,6 +145,13 @@ def write_csv(rows: list[dict], output_path: str) -> None:
 
 
 def main() -> None:
+    """Entry point: parse CLI arguments and scrape CompassEdu offer detail pages.
+
+    Iterates from ``--start-id`` down to ``--min-id``, fetching each
+    ``/newst/{id}`` page. Valid pages are parsed and appended to the output CSV
+    incrementally. Stops early after ``--max-consecutive-fails`` consecutive
+    missing or invalid pages.
+    """
     parser = argparse.ArgumentParser(
         description="Scrape CompassEdu offer list and detail pages."
     )
