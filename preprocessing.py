@@ -17,12 +17,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
-DEFAULT_OFFERS = Path(
-    "/Users/jackleo/UIUC_python_Project/597PR/Final_project/compass_offers_processed.csv"
-)
-DEFAULT_COSTS = Path(
-    "/Users/jackleo/UIUC_python_Project/597PR/Final_project/International_Education_Costs.csv"
-)
+_HERE = Path(__file__).parent
+DEFAULT_OFFERS = _HERE / "compass_offers_processed.csv"
+DEFAULT_COSTS = _HERE / "International_Education_Costs.csv"
 
 # Many schools have multiple names or variations, I record them here manually.
 MANUAL_ALIASES = {
@@ -32,6 +29,10 @@ MANUAL_ALIASES = {
     "university of wisconsin madison": "University of Wisconsin-Madison",
     "wisconsin madison": "University of Wisconsin-Madison",
     "ohio state university": "Ohio State University",
+    # Confirmed from fuzzy_review — exact names verified against cost CSV
+    "the university of texas at austin": "University of Texas Austin",
+    "royal holloway university of london": "Royal Holloway University",
+    "university of colorado boulder": "University of Colorado",
 }
 
 
@@ -47,8 +48,15 @@ NUM_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def contains_phd_text(text: str) -> bool:
-    # PHD should not be considered in this analysis, because they are founded by scholarship and have different cost structures. 
-    # I want to focus on non-PhD/master offers for better cost matching.
+    """Return True if *text* indicates a PhD-level program.
+
+    PhD offers are excluded from this analysis because they are typically
+    funded by scholarships and have a fundamentally different cost structure
+    from self-funded master's programs.
+
+    Checks for the Chinese character '博士', the substring 'phd', and 'doctor'
+    (case-insensitive).
+    """
     s = (text or "").strip()
     if not s:
         return False
@@ -63,31 +71,48 @@ def contains_phd_text(text: str) -> bool:
 
 
 def is_offer_phd_row(row: Dict[str, str]) -> bool:
-    # We should ignore PhD rows in the offer dataset, as they are funded by scholarships and have different cost structures. Some rows are explicitly labeled as PhD, while some may be inferred from the major/program name.
+    """Return True if the offer row represents a PhD admission.
+
+    Checks both the English (``录取专业_en``) and Chinese (``录取专业``) major
+    columns using :func:`contains_phd_text`.
+    """
     major_en = row.get("录取专业_en") or ""
     major_cn = row.get("录取专业") or ""
     return contains_phd_text(major_en) or contains_phd_text(major_cn)
 
 
 def is_cost_phd_row(row: Dict[str, str]) -> bool:
-    # We should ignore PhD rows in the cost dataset as well, to avoid mismatching with offers. Some cost rows are explicitly labeled as PhD, while some may be inferred from program/level.
+    """Return True if the cost dataset row represents a PhD-level program.
+
+    Checks the ``Level`` and ``Program`` columns using :func:`contains_phd_text`.
+    """
     level = row.get("Level") or ""
     program = row.get("Program") or ""
     return contains_phd_text(level) or contains_phd_text(program)
 
 
 def is_cost_master_row(row: Dict[str, str]) -> bool:
+    """Return True if the cost dataset row represents a master's-level program.
+
+    Matches any ``Level`` value that contains the substring ``'master'``
+    (case-insensitive), e.g. ``"Master's"``, ``"Masters"``.
+    """
     level = (row.get("Level") or "").strip().lower()
     return "master" in level
 
 
 def has_chinese_char(text: str) -> bool:
+    """Return True if *text* contains at least one CJK Unified Ideograph (U+4E00–U+9FFF)."""
     return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
 
 
 def is_chinese_student_row(row: Dict[str, str]) -> bool:
-    # Main heuristic: Chinese characters in undergraduate school name.
-    # Help with GPA conversion rules.
+    """Return True if the offer row likely belongs to a Chinese domestic student.
+
+    Heuristic: the undergraduate school name (``毕业学校``) contains at least
+    one Chinese character.  This is used to decide which GPA conversion rule
+    to apply when the raw GPA is on a 100-point scale.
+    """
     school_cn = row.get("毕业学校") or ""
     if has_chinese_char(school_cn):
         return True
@@ -95,6 +120,11 @@ def is_chinese_student_row(row: Dict[str, str]) -> bool:
 
 
 def parse_numeric(text: str) -> Optional[float]:
+    """Extract and return the first numeric value found in *text*, or None.
+
+    Handles integers and decimals, including negative numbers.
+    Returns None if *text* is empty, ``'nan'``, or contains no numeric pattern.
+    """
     s = (text or "").strip()
     if not s or s.lower() == "nan":
         return None
@@ -108,6 +138,11 @@ def parse_numeric(text: str) -> Optional[float]:
 
 
 def pct_to_gpa4_china_linear(score: float) -> float:
+    """Convert a Chinese 100-point score to a 4.0-scale GPA using the linear formula.
+
+    Formula: ``GPA = (score - 50) / 10``, clipped to the range ``[0.0, 4.0]``.
+    This is the common mainland Chinese conversion used in many application guidelines.
+    """
     # Common mainland conversion: GPA = (score - 50) / 10, clipped to [0, 4].
     gpa = (score - 50.0) / 10.0
     if gpa < 0:
@@ -118,6 +153,11 @@ def pct_to_gpa4_china_linear(score: float) -> float:
 
 
 def pct_to_gpa4_china_table(score: float) -> float:
+    """Convert a Chinese 100-point score to a 4.0-scale GPA using a step-table lookup.
+
+    Uses the stepped conversion table commonly referenced in Chinese university
+    application materials (e.g. 90+ → 4.0, 85–89 → 3.7, …, below 60 → 0.0).
+    """
     # Chinese step conversion table often used in school applications.
     if score >= 90:
         return 4.0
@@ -169,8 +209,17 @@ def standardize_gpa_to_4(
 
 
 def normalize_school_name(name: str) -> str:
-    # Normalize school names for deterministic matching, generated with help of gpt 5.3 codex.
-    # prompt: "Write a Python function to normalize university/school names for better matching. The function should handle common variations such as 'University of X' vs 'X University', remove common stop words like 'the', replace '&' with 'and', and remove punctuation. The output should be lowercase and stripped of extra whitespace."
+    """Return a normalized version of *name* for deterministic school-name matching.
+
+    Transformations applied (in order):
+    1. Strip whitespace and lowercase.
+    2. Replace em-dash / en-dash with a hyphen.
+    3. Remove a leading ``'the '``.
+    4. Replace ``'&'`` with ``'and'``.
+    5. Remove all characters except letters, digits, spaces, and hyphens.
+    6. Replace hyphens with spaces and collapse repeated whitespace.
+    """
+    # Normalize school names for deterministic matching.
     s = (name or "").strip().lower()
     s = s.replace("–", "-").replace("—", "-")
     s = re.sub(r"^the\s+", "", s)
@@ -181,8 +230,21 @@ def normalize_school_name(name: str) -> str:
     return s
 
 
-# Count total rows, missing school values, and per-school frequencies from one school column.
 def read_school_counter(path: Path, school_col: str, encoding: str) -> Tuple[int, int, Counter]:
+    """Read *path* and return row count, missing-school count, and per-school frequency.
+
+    Args:
+        path: Path to the CSV file.
+        school_col: Name of the column containing school names.
+        encoding: File encoding (e.g. ``'utf-8-sig'``).
+
+    Returns:
+        A tuple of ``(total_rows, missing_school_rows, school_counter)`` where
+        ``school_counter`` maps each school name to its occurrence count.
+
+    Raises:
+        ValueError: If *school_col* is not found in the CSV header.
+    """
     row_count = 0
     missing_school = 0
     school_counter: Counter = Counter()
@@ -206,7 +268,16 @@ def read_school_counter(path: Path, school_col: str, encoding: str) -> Tuple[int
 
 
 def read_csv_rows(path: Path, encoding: str) -> Tuple[List[str], List[Dict[str, str]]]:
-    # read from csv
+    """Read all rows from *path* and return the header and row list.
+
+    Args:
+        path: Path to the CSV file.
+        encoding: File encoding (e.g. ``'utf-8-sig'``).
+
+    Returns:
+        A tuple of ``(fieldnames, rows)`` where *fieldnames* is the ordered list
+        of column headers and *rows* is a list of ``DictReader`` row dicts.
+    """
     with path.open("r", encoding=encoding, newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or [])
@@ -215,6 +286,16 @@ def read_csv_rows(path: Path, encoding: str) -> Tuple[List[str], List[Dict[str, 
 
 
 def build_school_counter(rows: List[Dict[str, str]], school_col: str) -> Tuple[int, Counter]:
+    """Count per-school frequencies from an already-loaded list of rows.
+
+    Args:
+        rows: List of row dicts (e.g. from :func:`read_csv_rows`).
+        school_col: Name of the column containing school names.
+
+    Returns:
+        A tuple of ``(missing_school_count, school_counter)`` where
+        ``school_counter`` maps each non-empty school name to its occurrence count.
+    """
     missing_school = 0
     school_counter: Counter = Counter()
     for row in rows:
@@ -227,6 +308,15 @@ def build_school_counter(rows: List[Dict[str, str]], school_col: str) -> Tuple[i
 
 
 def unique_school_list(rows: List[Dict[str, str]], school_col: str) -> List[str]:
+    """Return a deduplicated list of school names preserving first-seen order.
+
+    Args:
+        rows: List of row dicts.
+        school_col: Name of the column containing school names.
+
+    Returns:
+        Unique, non-empty school names in the order they first appear in *rows*.
+    """
     schools: List[str] = []
     seen = set()
     for row in rows:
@@ -238,6 +328,7 @@ def unique_school_list(rows: List[Dict[str, str]], school_col: str) -> List[str]
 
 
 def to_float(value: str) -> float:
+    """Convert *value* to float, returning 0.0 if conversion fails or value is empty."""
     try:
         return float((value or "").strip())
     except (ValueError, AttributeError):
@@ -245,6 +336,19 @@ def to_float(value: str) -> float:
 
 
 def calc_total_cost_usd(row: Dict[str, str]) -> float:
+    """Calculate the estimated total cost of attendance in USD for one cost-dataset row.
+
+    Formula: ``tuition * duration + rent * 12 * duration + visa + insurance``
+
+    All fields are read via :func:`to_float` so missing values default to 0.
+
+    Args:
+        row: A cost-dataset row dict containing ``Duration_Years``, ``Tuition_USD``,
+             ``Rent_USD``, ``Visa_Fee_USD``, and ``Insurance_USD`` keys.
+
+    Returns:
+        Total estimated cost in USD as a float.
+    """
     # calculate total cost in USD based on tuition, living cost, visa, insurance, and duration.
     duration = to_float(row.get("Duration_Years", ""))
     tuition = to_float(row.get("Tuition_USD", ""))
@@ -258,6 +362,21 @@ def build_school_cost_profile(
     cost_rows: List[Dict[str, str]],
     school_col: str,
 ) -> Dict[str, Dict[str, str]]:
+    """Build a cost profile dict keyed by school name from the cost dataset.
+
+    For each school, selects the single most representative row:
+    - Prefers master's-level rows over other levels.
+    - Among the selected pool, picks the row whose total cost is closest to the
+      pool's median total cost.
+
+    Args:
+        cost_rows: Filtered cost-dataset rows (PhD rows already removed).
+        school_col: Name of the column containing school names.
+
+    Returns:
+        A dict mapping each school name to a flat dict of cost profile fields
+        (e.g. ``cost_tuition_usd``, ``cost_total_usd``, ``cost_country``, …).
+    """
     # build the profile for each school based on cost rows. If multiple rows exist for the same school, prefer master level, otherwise use median total cost to pick the most representative row.
     grouped: Dict[str, List[Dict[str, str]]] = defaultdict(list)
     for row in cost_rows:
@@ -267,7 +386,6 @@ def build_school_cost_profile(
 
     profiles: Dict[str, Dict[str, str]] = {}
     for school, rows in grouped.items():
-        # If multiple rows exist for the same school, prefer master level, otherwise use median total cost to pick the most representative row.
         master_rows = [r for r in rows if is_cost_master_row(r)]
         pool = master_rows if master_rows else rows
 
@@ -297,6 +415,19 @@ def build_school_cost_profile(
 
 
 def read_cost_schools(path: Path, school_col: str, encoding: str) -> List[str]:
+    """Return a deduplicated list of school names from the cost CSV, preserving order.
+
+    Args:
+        path: Path to the cost CSV file.
+        school_col: Name of the column containing school names.
+        encoding: File encoding (e.g. ``'utf-8-sig'``).
+
+    Returns:
+        Unique, non-empty school names in the order they first appear.
+
+    Raises:
+        ValueError: If *school_col* is not found in the CSV header.
+    """
     schools: List[str] = []
     seen = set()
     with path.open("r", encoding=encoding, newline="") as f:
@@ -320,6 +451,21 @@ def best_candidates(
     top_n: int,
     cutoff: float,
 ) -> List[Tuple[str, float]]:
+    """Return the top fuzzy-match candidates for *offer_school* from *cost_schools*.
+
+    Uses :func:`difflib.get_close_matches` for candidate retrieval, then ranks
+    results by :class:`difflib.SequenceMatcher` similarity ratio (descending).
+
+    Args:
+        offer_school: The school name from the offers dataset to match.
+        cost_schools: Sequence of school names from the cost dataset.
+        top_n: Maximum number of candidates to return.
+        cutoff: Minimum similarity ratio threshold (0–1) for a candidate to qualify.
+
+    Returns:
+        List of ``(school_name, similarity_score)`` tuples sorted by score descending.
+        Empty list if no candidates meet the cutoff.
+    """
     cands = difflib.get_close_matches(offer_school, cost_schools, n=top_n, cutoff=cutoff)
     scored = []
     for c in cands:
@@ -368,7 +514,13 @@ def resolve_costs_path(offers_path: Path, costs_arg: Optional[Path]) -> Tuple[Pa
 
 
 def main() -> None:
-    """读取数据、匹配学校、标准化 GPA，并输出带成本信息的结果 CSV。"""
+    """Entry point: match offer schools to cost schools and export an enriched CSV.
+
+    Reads the offers and costs CSV files, filters out PhD rows, runs a four-stage
+    school-name matching pipeline (exact → alias → normalized → fuzzy), standardizes
+    GPA values to a 4.0 scale, and writes the matched output CSV.  Prints a
+    human-readable summary of match coverage and GPA conversion statistics to stdout.
+    """
     parser = argparse.ArgumentParser(
         description="Check school matching quality between offer and cost datasets."
     )
@@ -379,7 +531,6 @@ def main() -> None:
         default=None,
         help="Optional. If omitted, auto-detect from offers folder and its parent.",
     )
-
     parser.add_argument("--offer-school-col", default="录取学校_en")
     parser.add_argument("--cost-school-col", default="University")
     parser.add_argument("--encoding", default="utf-8-sig")
@@ -406,12 +557,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # 检查输入文件并确定成本数据文件路径。
     if not args.offers.exists():
         raise FileNotFoundError(f"Offers file not found: {args.offers}")
     costs_path, costs_source = resolve_costs_path(args.offers, args.costs)
 
-    # 读取 offer 与 cost 数据集，按字段名验证列是否存在。
     offer_fieldnames, offer_rows_all = read_csv_rows(args.offers, args.encoding)
     if args.offer_school_col not in offer_fieldnames:
         raise ValueError(
@@ -426,19 +575,16 @@ def main() -> None:
             f"Available columns: {cost_fieldnames}"
         )
 
-    # 过滤掉 PhD 行，因为博士 offer 与成本结构不同，不参与后续匹配与输出。
     offer_rows = [r for r in offer_rows_all if not is_offer_phd_row(r)]
     cost_rows = [r for r in cost_rows_all if not is_cost_phd_row(r)]
 
     offer_phd_removed = len(offer_rows_all) - len(offer_rows)
     cost_phd_removed = len(cost_rows_all) - len(cost_rows)
 
-    # 统计 offer 学校出现次数，准备后续匹配与覆盖率分析。
     missing_offer_school, offer_counter = build_school_counter(offer_rows, args.offer_school_col)
     cost_schools = unique_school_list(cost_rows, args.cost_school_col)
     cost_school_set = set(cost_schools)
 
-    # 输出基础数据检查信息，便于观察过滤前后行数和学校数量。
     print("[basic_check]")
     print(f"offers_file = {args.offers}")
     print(f"costs_file = {costs_path}  # {costs_source}")
@@ -458,18 +604,18 @@ def main() -> None:
     for school, cnt in offer_counter.most_common(args.top_schools):
         print(f"{school} = {cnt}")
 
-    # 1) exact match：offer 学校名称与成本数据中的学校名称完全一致。
+    # 1) exact matches
     final_matches: Dict[str, MatchRecord] = {}
     for school, cnt in offer_counter.items():
         if school in cost_school_set:
             final_matches[school] = MatchRecord(school, school, cnt, "exact")
 
-    # 剩余未匹配的 offer 学校。
+    # Remaining after exact
     remaining = {
         s: c for s, c in offer_counter.items() if s not in final_matches
     }
 
-    # 2) manual alias：使用手工维护的别名字典匹配常见变体。
+    # 2) manual alias
     alias_hits = 0
     for school, cnt in list(remaining.items()):
         key = normalize_school_name(school)
@@ -479,7 +625,7 @@ def main() -> None:
             alias_hits += 1
             remaining.pop(school)
 
-    # 3) normalized unique matching：对学校名称做标准化后，只有唯一候选时才匹配。
+    # 3) normalized unique matching
     cost_norm_map: Dict[str, set] = defaultdict(set)
     for c in cost_schools:
         cost_norm_map[normalize_school_name(c)].add(c)
@@ -498,7 +644,7 @@ def main() -> None:
         elif len(candidates) > 1:
             ambiguous_normalized.append((school, cnt, candidates))
 
-    # 4) fuzzy matching：剩余学校使用相似度匹配，并根据阈值自动接受或留待人工复核。
+    # 4) fuzzy candidates for remaining schools
     fuzzy_auto_hits = 0
     fuzzy_review = []
     fuzzy_no_candidate = []
@@ -594,7 +740,6 @@ def main() -> None:
     if output_csv.parent and not output_csv.parent.exists():
         output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    # 为每个 cost 学校生成一个代表性成本 profile，用于输出匹配结果时补充成本列。
     cost_profile = build_school_cost_profile(cost_rows, args.cost_school_col)
 
     cost_cols = [
