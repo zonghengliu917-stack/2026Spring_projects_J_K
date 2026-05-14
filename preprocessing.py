@@ -47,6 +47,14 @@ NUM_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def contains_phd_text(text: str) -> bool:
+    """
+    >>> contains_phd_text("PhD in CS")
+    True
+    >>> contains_phd_text("博士项目")
+    True
+    >>> contains_phd_text("MS in CS")
+    False
+    """
     # PHD should not be considered in this analysis, because they are founded by scholarship and have different cost structures. 
     # I want to focus on non-PhD/master offers for better cost matching.
     s = (text or "").strip()
@@ -95,6 +103,14 @@ def is_chinese_student_row(row: Dict[str, str]) -> bool:
 
 
 def parse_numeric(text: str) -> Optional[float]:
+    """
+    >>> parse_numeric("3.85/4.0")
+    3.85
+    >>> parse_numeric("GPA: 92")
+    92.0
+    >>> parse_numeric("nan") is None
+    True
+    """
     s = (text or "").strip()
     if not s or s.lower() == "nan":
         return None
@@ -108,6 +124,14 @@ def parse_numeric(text: str) -> Optional[float]:
 
 
 def pct_to_gpa4_china_linear(score: float) -> float:
+    """
+    >>> pct_to_gpa4_china_linear(90)
+    4.0
+    >>> pct_to_gpa4_china_linear(80)
+    3.0
+    >>> pct_to_gpa4_china_linear(40)
+    0.0
+    """
     # Common mainland conversion: GPA = (score - 50) / 10, clipped to [0, 4].
     gpa = (score - 50.0) / 10.0
     if gpa < 0:
@@ -118,6 +142,14 @@ def pct_to_gpa4_china_linear(score: float) -> float:
 
 
 def pct_to_gpa4_china_table(score: float) -> float:
+    """
+    >>> pct_to_gpa4_china_table(90)
+    4.0
+    >>> pct_to_gpa4_china_table(85)
+    3.7
+    >>> pct_to_gpa4_china_table(61)
+    1.0
+    """
     # Chinese step conversion table often used in school applications.
     if score >= 90:
         return 4.0
@@ -145,6 +177,15 @@ def standardize_gpa_to_4(
 ) -> Tuple[str, str, str]:
     """
     Returns (gpa_numeric_raw, gpa_4_standardized, gpa_status)
+
+    >>> standardize_gpa_to_4({"GPA": "3.8", "毕业学校": "UIUC"}, "china_linear")
+    ('3.8000', '3.8000', 'already_4_scale')
+    >>> standardize_gpa_to_4({"GPA": "88", "毕业学校": "清华大学"}, "china_table")
+    ('88.0000', '3.7000', 'converted_from_100')
+    >>> standardize_gpa_to_4({"GPA": "88", "毕业学校": "UIUC"}, "china_linear")
+    ('88.0000', '', 'percent_non_china_not_converted')
+    >>> standardize_gpa_to_4({"GPA": ""}, "china_linear")
+    ('', '', 'missing_or_invalid')
     """
     raw = parse_numeric(row.get("GPA") or "")
     if raw is None:
@@ -169,6 +210,12 @@ def standardize_gpa_to_4(
 
 
 def normalize_school_name(name: str) -> str:
+    """
+    >>> normalize_school_name("The University of Michigan, Ann Arbor")
+    'university of michigan ann arbor'
+    >>> normalize_school_name("William & Mary")
+    'william and mary'
+    """
     # Normalize school names for deterministic matching, generated with help of gpt 5.3 codex.
     # prompt: "Write a Python function to normalize university/school names for better matching. The function should handle common variations such as 'University of X' vs 'X University', remove common stop words like 'the', replace '&' with 'and', and remove punctuation. The output should be lowercase and stripped of extra whitespace."
     s = (name or "").strip().lower()
@@ -238,6 +285,12 @@ def unique_school_list(rows: List[Dict[str, str]], school_col: str) -> List[str]
 
 
 def to_float(value: str) -> float:
+    """
+    >>> to_float("12.5")
+    12.5
+    >>> to_float("")
+    0.0
+    """
     try:
         return float((value or "").strip())
     except (ValueError, AttributeError):
@@ -245,6 +298,16 @@ def to_float(value: str) -> float:
 
 
 def calc_total_cost_usd(row: Dict[str, str]) -> float:
+    """
+    >>> calc_total_cost_usd({
+    ...     "Duration_Years": "2",
+    ...     "Tuition_USD": "10000",
+    ...     "Rent_USD": "1000",
+    ...     "Visa_Fee_USD": "500",
+    ...     "Insurance_USD": "1500",
+    ... })
+    46000.0
+    """
     # calculate total cost in USD based on tuition, living cost, visa, insurance, and duration.
     duration = to_float(row.get("Duration_Years", ""))
     tuition = to_float(row.get("Tuition_USD", ""))
